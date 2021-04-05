@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 import numpy as np
 import torch
 import torch.optim as optim
@@ -21,8 +23,9 @@ def get_action(state, target_net, epsilon, env, hidden):
         return action, hidden
 
 
-def update_target_model(online_net, target_net):
-    target_net.load_state_dict(online_net.state_dict())
+@torch.no_grad()
+def update_target_model(*, src, dst):
+    dst.load_state_dict(src.state_dict())
 
 
 class Maze(Wrapper):
@@ -41,24 +44,30 @@ class Maze(Wrapper):
 def main():
     # observation is the x, y coordinate of the grid
     # env = Maze(MazeEnvSample5x5())
-    env = Maze(RandomDiscoMaze(3, 3, n_targets=1, n_colors=5))
+    env = Maze(RandomDiscoMaze(5, 5, n_targets=20, n_colors=2, field=(2, 2)))
 
     torch.manual_seed(config.random_seed)
     env.seed(config.random_seed)
     np.random.seed(config.random_seed)
     env.action_space.seed(config.random_seed)
 
-    wandb.init(config=config.__dict__)
+    # wandb.init(config=config.__dict__)
 
     shape_input = env.observation_space.shape
     num_actions = env.action_space.n
     print("state shape:", shape_input)
     print("action shape:", num_actions)
 
-    online_net = R2D2(shape_input, num_actions)
-    target_net = R2D2(shape_input, num_actions)
-    update_target_model(online_net, target_net)
     embedding_model = EmbeddingModel(shape_input, num_actions)
+    # shared embedding in the inverse dynamics and agent networks
+    embedding = embedding_model.embedding
+
+    online_net = R2D2(shape_input, num_actions,
+                      embedding=embedding, detach=False)
+    target_net = deepcopy(online_net)  # copy potentially shared layers
+
+    update_target_model(src=online_net, dst=target_net)
+
     embedding_loss = 0
 
     optimizer = optim.Adam(online_net.parameters(), lr=config.lr)
@@ -76,7 +85,7 @@ def main():
     sum_augmented_reward = 0
     sum_obs_set = 0
 
-    for episode in range(30000):
+    for episode in range(300000):
         done = False
         state = env.reset()
         env.render(mode='human')
@@ -88,7 +97,8 @@ def main():
             torch.zeros(1, 1, config.hidden_size, device=config.device),
         )
 
-        episodic_memory = [embedding_model.embedding(state)]
+        with torch.no_grad():
+            episodic_memory = [embedding_model.embedding(state)]
 
         episode_steps = 0
         horizon = 100
@@ -105,7 +115,9 @@ def main():
 
             augmented_reward = env_reward
             if config.enable_ngu:
-                next_state_emb = embedding_model.embedding(next_state)
+                with torch.no_grad():
+                    next_state_emb = embedding_model.embedding(next_state)
+
                 intrinsic_reward = compute_intrinsic_reward(episodic_memory, next_state_emb)
                 episodic_memory.append(next_state_emb)
                 beta = 0.0001
@@ -124,6 +136,7 @@ def main():
             state = next_state
             sum_augmented_reward += augmented_reward
 
+            # begin training if enough episodes have been collected
             if steps > config.initial_exploration and len(memory) > config.batch_size:
                 epsilon -= config.epsilon_decay
                 epsilon = max(epsilon, 0.4)
@@ -137,7 +150,7 @@ def main():
                 memory.update_priority(indexes, td_error, lengths)
 
                 if steps % config.update_target == 0:
-                    update_target_model(online_net, target_net)
+                    update_target_model(src=online_net, dst=target_net)
 
             if episode_steps >= horizon or done:
                 sum_obs_set += env.n_steps
@@ -157,10 +170,10 @@ def main():
                 "sum_obs_set": sum_obs_set / config.log_interval,
             }
             print(metrics)
-            wandb.log({
-                # "maze": [wandb.Image(, caption="state")],
-                **metrics
-            })
+            # wandb.log({
+            #     # "maze": [wandb.Image(, caption="state")],
+            #     **metrics
+            # })
 
             sum_reward = 0
             sum_augmented_reward = 0
