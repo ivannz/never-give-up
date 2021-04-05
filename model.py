@@ -6,12 +6,21 @@ from config import config
 
 
 class R2D2(nn.Module):
-    def __init__(self, shape, num_outputs):
+    def __init__(self, shape, num_outputs, embedding=None, detach=False):
         super().__init__()
         self.shape = torch.Size(shape)
         self.num_outputs = num_outputs
 
-        self.lstm = nn.LSTM(input_size=self.shape.numel(),
+        self.embedding = embedding or nn.Flatten(-len(self.shape), -1)
+        self.detach = detach
+
+        if embedding is not None:
+            shape = embedding.shape
+
+        else:
+            shape = self.shape
+
+        self.lstm = nn.LSTM(input_size=shape.numel(),
                             hidden_size=config.hidden_size,
                             batch_first=True)
         self.fc = nn.Linear(config.hidden_size, 128)
@@ -23,7 +32,9 @@ class R2D2(nn.Module):
         batch_size, sequence_length, *shape = x.shape
         assert torch.Size(shape) == self.shape
 
-        input = x.flatten(-len(self.shape), -1)
+        input = self.embedding(x)
+        input = input.detach() if self.detach else input
+
         out, hidden = self.lstm(input, hidden)
 
         out = F.relu(self.fc(out))
