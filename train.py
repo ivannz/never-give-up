@@ -1,3 +1,6 @@
+import time
+import tqdm
+
 from copy import deepcopy
 
 import numpy as np
@@ -51,7 +54,7 @@ def main():
     np.random.seed(config.random_seed)
     env.action_space.seed(config.random_seed)
 
-    # wandb.init(config=config.__dict__)
+    wandb.init(config=config.__dict__)
 
     shape_input = env.observation_space.shape
     num_actions = env.action_space.n
@@ -85,7 +88,7 @@ def main():
     sum_augmented_reward = 0
     sum_obs_set = 0
 
-    for episode in range(300000):
+    for episode in tqdm.tqdm(range(300000)):
         done = False
         state = env.reset()
         env.render(mode='human')
@@ -100,6 +103,7 @@ def main():
         with torch.no_grad():
             episodic_memory = [embedding_model.embedding(state)]
 
+        # rollout
         episode_steps = 0
         horizon = 100
         while not done:
@@ -109,7 +113,11 @@ def main():
             action, new_hidden = get_action(state, target_net, epsilon, env, hidden)
 
             next_state, env_reward, done, _ = env.step(action)
+
+            tick = time.monotonic()
             env.render(mode='human')
+            delta = time.monotonic() - tick
+
             next_state = torch.from_numpy(next_state).to(
                 config.device, dtype=torch.float32)
 
@@ -168,16 +176,32 @@ def main():
                 "mean_augmented_reward": mean_augmented_reward,
                 "steps": steps,
                 "sum_obs_set": sum_obs_set / config.log_interval,
+                "delta": delta,
             }
-            print(metrics)
-            # wandb.log({
-            #     # "maze": [wandb.Image(, caption="state")],
-            #     **metrics
-            # })
+            # print(metrics)
+            wandb.log({
+                # "maze": [wandb.Image(, caption="state")],
+                **metrics
+            })
 
             sum_reward = 0
             sum_augmented_reward = 0
             sum_obs_set = 0
+
+        torch.save({
+            'embedding_model': embedding_model.state_dict(),
+            'online_net': online_net.state_dict(),
+            'target_net': target_net.state_dict(),
+        }, 'checkpoints/latest.pt')
+
+    # save the models
+    dttm = time.strftime('%Y%m%d-%H%M%S')
+
+    torch.save({
+        'embedding_model': embedding_model.state_dict(),
+        'online_net': online_net.state_dict(),
+        'target_net': target_net.state_dict(),
+    }, f'checkpoints/checkpoint__{dttm}.pt')
 
 
 if __name__ == "__main__":
