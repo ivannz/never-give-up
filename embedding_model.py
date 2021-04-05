@@ -10,18 +10,19 @@ from config import config
 
 
 class EmbeddingModel(nn.Module):
-    def __init__(self, shape, num_outputs, n_hidden=32):
+    def __init__(self, shape, num_outputs, n_hidden=256):
         super().__init__()
         self.shape = torch.Size(shape)
         self.num_outputs = num_outputs
 
-        self.features = nn.Sequential(
+        self.embedding = nn.Sequential(
             nn.Flatten(-len(self.shape), -1),
             nn.Linear(self.shape.numel(), n_hidden, bias=True),
             nn.ReLU(),
             nn.Linear(n_hidden, n_hidden, bias=True),
             nn.ReLU(),
         )
+        self.embedding.shape = torch.Size((n_hidden,))
 
         self.classifier = nn.Sequential(
             nn.Linear(n_hidden * 2, num_outputs, bias=True),
@@ -37,9 +38,6 @@ class EmbeddingModel(nn.Module):
             self.embedding(x1),
             self.embedding(x2),
         ], dim=-1))
-
-    def embedding(self, x):
-        return self.features(x)
 
     def train_model(self, batch):
         states, next_states, actions = map(
