@@ -6,21 +6,25 @@ from config import config
 
 
 class R2D2(nn.Module):
-    def __init__(self, num_inputs, num_outputs):
-        super(R2D2, self).__init__()
-        self.num_inputs = num_inputs
+    def __init__(self, shape, num_outputs):
+        super().__init__()
+        self.shape = torch.Size(shape)
         self.num_outputs = num_outputs
 
-        self.lstm = nn.LSTM(input_size=num_inputs, hidden_size=config.hidden_size, batch_first=True)
+        self.lstm = nn.LSTM(input_size=self.shape.numel(),
+                            hidden_size=config.hidden_size,
+                            batch_first=True)
         self.fc = nn.Linear(config.hidden_size, 128)
         self.fc_adv = nn.Linear(128, num_outputs)
         self.fc_val = nn.Linear(128, 1)
 
     def forward(self, x, hidden=None):
-        # x [batch_size, sequence_length, num_inputs]
-        batch_size = x.size()[0]
-        sequence_length = x.size()[1]
-        out, hidden = self.lstm(x, hidden)
+        # x [batch_size, sequence_length, *self.shape]
+        batch_size, sequence_length, *shape = x.shape
+        assert torch.Size(shape) == self.shape
+
+        input = x.flatten(-len(self.shape), -1)
+        out, hidden = self.lstm(input, hidden)
 
         out = F.relu(self.fc(out))
         adv = self.fc_adv(out)
@@ -35,11 +39,11 @@ class R2D2(nn.Module):
     @classmethod
     def get_td_error(cls, online_net, target_net, batch, lengths):
         def slice_burn_in(item):
-            return item[:, config.burn_in_length :, :]
+            return item[:, config.burn_in_length:, :]
 
         batch_size = torch.stack(batch.state).size()[0]
-        states = torch.stack(batch.state).view(batch_size, config.sequence_length, online_net.num_inputs)
-        next_states = torch.stack(batch.next_state).view(batch_size, config.sequence_length, online_net.num_inputs)
+        states = torch.stack(batch.state).view(batch_size, config.sequence_length, *online_net.shape)
+        next_states = torch.stack(batch.next_state).view(batch_size, config.sequence_length, *online_net.shape)
         actions = torch.stack(batch.action).view(batch_size, config.sequence_length, -1).long()
         rewards = torch.stack(batch.reward).view(batch_size, config.sequence_length, -1)
         masks = torch.stack(batch.mask).view(batch_size, config.sequence_length, -1)
@@ -84,13 +88,13 @@ class R2D2(nn.Module):
     def train_model(cls, online_net, target_net, optimizer, batch, lengths):
         td_error = cls.get_td_error(online_net, target_net, batch, lengths)
 
-        loss = pow(td_error, 2).mean()
+        loss = td_error.mul(td_error).mean()
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-        return loss, td_error
+        return float(loss), td_error.detach()
 
     def get_action(self, state, hidden):
         state = state.unsqueeze(0).unsqueeze(0)

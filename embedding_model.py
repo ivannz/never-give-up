@@ -3,49 +3,62 @@ from typing import List
 import numpy as np
 import torch
 import torch.nn.functional as F
+
 from torch import nn, optim, Tensor
 
 from config import config
 
 
 class EmbeddingModel(nn.Module):
-    def __init__(self, obs_size, num_outputs):
-        super(EmbeddingModel, self).__init__()
-        self.obs_size = obs_size
+    def __init__(self, shape, num_outputs, n_hidden=32):
+        super().__init__()
+        self.shape = torch.Size(shape)
         self.num_outputs = num_outputs
 
-        self.fc1 = nn.Linear(obs_size, 32)
-        self.fc2 = nn.Linear(32, 32)
-        self.last = nn.Linear(32 * 2, num_outputs)
+        self.features = nn.Sequential(
+            nn.Flatten(-len(self.shape), -1),
+            nn.Linear(self.shape.numel(), n_hidden, bias=True),
+            nn.ReLU(),
+            nn.Linear(n_hidden, n_hidden, bias=True),
+            nn.ReLU(),
+        )
+
+        self.classifier = nn.Sequential(
+            nn.Linear(n_hidden * 2, num_outputs, bias=True),
+            nn.LogSoftmax(dim=-1),
+        )
+
+        self.criterion = nn.NLLLoss(reduction='mean')
 
         self.optimizer = optim.Adam(self.parameters(), lr=1e-5)
 
     def forward(self, x1, x2):
-        x1 = self.embedding(x1)
-        x2 = self.embedding(x2)
-        x = torch.cat([x1, x2], dim=2)
-        x = self.last(x)
-        return nn.Softmax(dim=2)(x)
+        return self.classifier(torch.cat([
+            self.embedding(x1),
+            self.embedding(x2),
+        ], dim=-1))
 
     def embedding(self, x):
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        return x
+        return self.features(x)
 
     def train_model(self, batch):
-        batch_size = torch.stack(batch.state).size()[0]
-        # last 5 in sequence
-        states = torch.stack(batch.state).view(batch_size, config.sequence_length, self.obs_size)[:, -5:, :]
-        next_states = torch.stack(batch.next_state).view(batch_size, config.sequence_length, self.obs_size)[:, -5:, :]
-        actions = torch.stack(batch.action).view(batch_size, config.sequence_length, -1).long()[:, -5:, :]
+        states, next_states, actions = map(
+            torch.stack, (batch.state, batch.next_state, batch.action))
+
+        batch_size, sequence_length, *shape = states.shape
+        assert sequence_length == config.sequence_length
+        assert torch.Size(shape) == self.shape
+
+        # last 5 in sequence (see paper appendix A)
+        states, next_states, actions = states[:, -5:], next_states[:, -5:], actions[:, -5:]
 
         self.optimizer.zero_grad()
         net_out = self.forward(states, next_states)
-        actions_one_hot = torch.squeeze(F.one_hot(actions, self.num_outputs)).float()
-        loss = nn.MSELoss()(net_out, actions_one_hot)
+        loss = self.criterion(net_out.transpose(-1, -2), actions)
+
         loss.backward()
         self.optimizer.step()
-        return loss.item()
+        return float(loss)
 
 
 def compute_intrinsic_reward(

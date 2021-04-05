@@ -48,16 +48,20 @@ class LocalBuffer(object):
         if (len(self.local_memory) + len(self.over_lapping_from_prev)) == config.sequence_length or mask == 0:
             self.local_memory = self.over_lapping_from_prev + self.local_memory
             length = len(self.local_memory)
+
+            # prepend zeros
+            last = self.local_memory[0]
             while len(self.local_memory) < config.sequence_length:
-                self.local_memory.append(
+                self.local_memory.insert(
+                    0,
                     Transition(
-                        torch.Tensor([0, 0]),
-                        torch.Tensor([0, 0]),
+                        torch.zeros_like(last.state),
+                        torch.zeros_like(last.next_state),
                         0,
                         0,
                         0,
                         0,
-                        torch.zeros([2, 1, config.hidden_size]).view(2, -1),
+                        torch.zeros_like(last.rnn_state),
                     )
                 )
             self.memory.append([self.local_memory, length])
@@ -69,26 +73,21 @@ class LocalBuffer(object):
 
     def sample(self):
         episodes = self.memory
-        (
-            batch_state,
-            batch_next_state,
-            batch_action,
-            batch_reward,
-            batch_mask,
-            batch_step,
-            batch_rnn_state,
-        ) = ([], [], [], [], [], [], [])
+        batch_state, batch_next_state = [], []
+        batch_action, batch_reward = [], []
+        batch_mask, batch_step = [], []
+        batch_rnn_state = []
         lengths = []
         for episode, length in episodes:
             batch = Transition(*zip(*episode))
 
-            batch_state.append(torch.stack(list(batch.state)))
-            batch_next_state.append(torch.stack(list(batch.next_state)))
-            batch_action.append(torch.Tensor(list(batch.action)))
-            batch_reward.append(torch.Tensor(list(batch.reward)))
-            batch_mask.append(torch.Tensor(list(batch.mask)))
-            batch_step.append(torch.Tensor(list(batch.step)))
-            batch_rnn_state.append(torch.stack(list(batch.rnn_state)))
+            batch_state.append(torch.stack(batch.state))
+            batch_next_state.append(torch.stack(batch.next_state))
+            batch_action.append(torch.tensor(batch.action))
+            batch_reward.append(torch.tensor(batch.reward))
+            batch_mask.append(torch.tensor(batch.mask))
+            batch_step.append(torch.tensor(batch.step))
+            batch_rnn_state.append(torch.stack(batch.rnn_state))
 
             lengths.append(length)
         self.memory = []
@@ -113,13 +112,14 @@ class Memory(object):
         self.memory_probability = deque(maxlen=capacity)
 
     def td_error_to_priority(self, td_error, lengths):
-        abs_td_error_sum = td_error.abs().sum(dim=1, keepdim=True).view(-1).detach().numpy()
-        lengths_burn = [length - config.burn_in_length + 1 for length in lengths]
+        abs_td_error = td_error.detach().abs()
+        abs_td_error_sum = abs_td_error.sum(dim=1).flatten().numpy()
+        prior_max = abs_td_error.max(dim=1).values.flatten().numpy()
 
-        prior_max = td_error.abs().max(dim=1, keepdim=True)[0].view(-1).detach().numpy()
-
-        prior_mean = abs_td_error_sum / lengths_burn
+        # lengths_burn = [length - config.burn_in_length + 1 for length in lengths]
+        prior_mean = abs_td_error_sum / np.array(lengths)
         prior = config.eta * prior_max + (1 - config.eta) * prior_mean
+
         return prior
 
     def push(self, td_error, batch, lengths):
@@ -145,21 +145,19 @@ class Memory(object):
 
     def sample(self, batch_size):
         probability = np.array(self.memory_probability)
-        probability = probability / probability.sum()
+        if probability.sum() > 0:
+            probability = probability / probability.sum()
+        else:
+            probability = np.full(probability.shape, 1 / probability.size)
 
         indexes = np.random.choice(range(len(self.memory_probability)), batch_size, p=probability)
         episodes = [self.memory[idx][0] for idx in indexes]
         lengths = [self.memory[idx][1] for idx in indexes]
 
-        (
-            batch_state,
-            batch_next_state,
-            batch_action,
-            batch_reward,
-            batch_mask,
-            batch_step,
-            batch_rnn_state,
-        ) = ([], [], [], [], [], [], [])
+        batch_state, batch_next_state = [], []
+        batch_action, batch_reward = [], []
+        batch_mask, batch_step = [], []
+        batch_rnn_state = []
         for episode in episodes:
             batch_state.append(episode.state)
             batch_next_state.append(episode.next_state)
@@ -168,6 +166,11 @@ class Memory(object):
             batch_mask.append(episode.mask)
             batch_step.append(episode.step)
             batch_rnn_state.append(episode.rnn_state)
+
+        # ("state", "next_state", "action", "reward", "mask", "step", "rnn_state")
+
+        # breakpoint()
+        # out = Transition(*zip(*episodes))
 
         return (
             Transition(

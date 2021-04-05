@@ -4,6 +4,7 @@ import torch.optim as optim
 import wandb
 from gym import Wrapper
 from gym_maze.envs.maze_env import MazeEnvSample5x5
+from gym_discomaze import RandomDiscoMaze
 
 from config import config
 from embedding_model import EmbeddingModel, compute_intrinsic_reward
@@ -26,36 +27,38 @@ def update_target_model(online_net, target_net):
 
 class Maze(Wrapper):
     def step(self, action: int):
-        obs, rew, done, info = super().step(["N", "E", "S", "W"][action])
-        self.set.add((obs[0], obs[1]))
+        obs, rew, done, info = super().step(action)
+        self.n_steps += 1
         if rew > 0:
             rew = 10
-        return obs / 10, rew, done, info
+        return obs, rew, done, info
 
     def reset(self):
-        self.set = set()
+        self.n_steps = 0
         return super().reset()
 
 
 def main():
-    env = Maze(MazeEnvSample5x5())
+    # observation is the x, y coordinate of the grid
+    # env = Maze(MazeEnvSample5x5())
+    env = Maze(RandomDiscoMaze(3, 3, n_targets=1, n_colors=5))
 
     torch.manual_seed(config.random_seed)
     env.seed(config.random_seed)
     np.random.seed(config.random_seed)
     env.action_space.seed(config.random_seed)
 
-    wandb.init(project="ngu-maze", config=config.__dict__)
+    wandb.init(config=config.__dict__)
 
-    num_inputs = env.observation_space.shape[0]
+    shape_input = env.observation_space.shape
     num_actions = env.action_space.n
-    print("state size:", num_inputs)
-    print("action size:", num_actions)
+    print("state shape:", shape_input)
+    print("action shape:", num_actions)
 
-    online_net = R2D2(num_inputs, num_actions)
-    target_net = R2D2(num_inputs, num_actions)
+    online_net = R2D2(shape_input, num_actions)
+    target_net = R2D2(shape_input, num_actions)
     update_target_model(online_net, target_net)
-    embedding_model = EmbeddingModel(obs_size=num_inputs, num_outputs=num_actions)
+    embedding_model = EmbeddingModel(shape_input, num_actions)
     embedding_loss = 0
 
     optimizer = optim.Adam(online_net.parameters(), lr=config.lr)
@@ -76,11 +79,13 @@ def main():
     for episode in range(30000):
         done = False
         state = env.reset()
-        state = torch.Tensor(state).to(config.device)
+        env.render(mode='human')
+        state = torch.from_numpy(state).to(
+            config.device, dtype=torch.float32)
 
         hidden = (
-            torch.Tensor().new_zeros(1, 1, config.hidden_size),
-            torch.Tensor().new_zeros(1, 1, config.hidden_size),
+            torch.zeros(1, 1, config.hidden_size, device=config.device),
+            torch.zeros(1, 1, config.hidden_size, device=config.device),
         )
 
         episodic_memory = [embedding_model.embedding(state)]
@@ -94,7 +99,9 @@ def main():
             action, new_hidden = get_action(state, target_net, epsilon, env, hidden)
 
             next_state, env_reward, done, _ = env.step(action)
-            next_state = torch.Tensor(next_state)
+            env.render(mode='human')
+            next_state = torch.from_numpy(next_state).to(
+                config.device, dtype=torch.float32)
 
             augmented_reward = env_reward
             if config.enable_ngu:
@@ -133,7 +140,7 @@ def main():
                     update_target_model(online_net, target_net)
 
             if episode_steps >= horizon or done:
-                sum_obs_set += len(env.set)
+                sum_obs_set += env.n_steps
                 break
 
         if episode > 0 and episode % config.log_interval == 0:
@@ -150,7 +157,10 @@ def main():
                 "sum_obs_set": sum_obs_set / config.log_interval,
             }
             print(metrics)
-            wandb.log(metrics)
+            wandb.log({
+                # "maze": [wandb.Image(, caption="state")],
+                **metrics
+            })
 
             sum_reward = 0
             sum_augmented_reward = 0
