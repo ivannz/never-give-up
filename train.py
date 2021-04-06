@@ -9,6 +9,7 @@ import torch
 import torch.optim as optim
 import wandb
 from gym import Wrapper
+from gym.wrappers import Monitor
 from gym_maze.envs.maze_env import MazeEnvSample5x5
 from gym_discomaze import RandomDiscoMaze
 
@@ -51,13 +52,14 @@ def main():
     # observation is the x, y coordinate of the grid
     # env = Maze(MazeEnvSample5x5())
     env = Maze(RandomDiscoMaze(5, 5, n_targets=20, n_colors=2, field=(2, 2)))
+    env = Monitor(env, directory='./_monitor')
 
     torch.manual_seed(config.random_seed)
     env.seed(config.random_seed)
     np.random.seed(config.random_seed)
     env.action_space.seed(config.random_seed)
 
-    wandb.init(config=config.__dict__)
+    wandb.init(config=config.__dict__, monitor_gym=True)
 
     shape_input = env.observation_space.shape
     num_actions = env.action_space.n
