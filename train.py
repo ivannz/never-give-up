@@ -1,3 +1,4 @@
+import os
 import time
 import tqdm
 
@@ -45,6 +46,8 @@ class Maze(Wrapper):
 
 
 def main():
+    path_ckpt = os.path.abspath('./checkpoints')
+
     # observation is the x, y coordinate of the grid
     # env = Maze(MazeEnvSample5x5())
     env = Maze(RandomDiscoMaze(5, 5, n_targets=20, n_colors=2, field=(2, 2)))
@@ -67,7 +70,21 @@ def main():
 
     online_net = R2D2(shape_input, num_actions,
                       embedding=embedding, detach=False)
-    target_net = deepcopy(online_net)  # copy potentially shared layers
+
+    # make independent copies of potentially shared layers
+    target_net = deepcopy(online_net)
+
+    if os.path.isfile(os.path.join(path_ckpt, 'latest.pt')):
+        checkpoint = torch.load(os.path.join(path_ckpt, 'latest.pt'))
+
+        online_net.load_state_dict(checkpoint['online_net'])
+        # target_net.load_state_dict(checkpoint['target_net'])
+        embedding_model.load_state_dict(checkpoint['embedding_model'])
+
+        # keep the backup, but
+        dttm = time.strftime('%Y%m%d-%H%M%S')
+        os.rename(os.path.join(path_ckpt, 'latest.pt'),
+                  os.path.join(path_ckpt, f'backup__{dttm}.pt'))
 
     update_target_model(src=online_net, dst=target_net)
 
@@ -87,6 +104,7 @@ def main():
     sum_reward = 0
     sum_augmented_reward = 0
     sum_obs_set = 0
+    sum_delta = 0.
 
     for episode in tqdm.tqdm(range(300000)):
         done = False
@@ -116,7 +134,7 @@ def main():
 
             tick = time.monotonic()
             env.render(mode='human')
-            delta = time.monotonic() - tick
+            sum_delta += time.monotonic() - tick
 
             next_state = torch.from_numpy(next_state).to(
                 config.device, dtype=torch.float32)
@@ -158,6 +176,8 @@ def main():
                 memory.update_priority(indexes, td_error, lengths)
 
                 if steps % config.update_target == 0:
+                    # `target_net` does not physically share any layers or
+                    #  parameters with either `online_net` or `embedding_model`
                     update_target_model(src=online_net, dst=target_net)
 
             if episode_steps >= horizon or done:
@@ -176,7 +196,7 @@ def main():
                 "mean_augmented_reward": mean_augmented_reward,
                 "steps": steps,
                 "sum_obs_set": sum_obs_set / config.log_interval,
-                "delta": delta,
+                "delta": sum_delta / sum_obs_set,
             }
             # print(metrics)
             wandb.log({
@@ -187,12 +207,13 @@ def main():
             sum_reward = 0
             sum_augmented_reward = 0
             sum_obs_set = 0
+            sum_delta = 0
 
         torch.save({
             'embedding_model': embedding_model.state_dict(),
             'online_net': online_net.state_dict(),
             'target_net': target_net.state_dict(),
-        }, 'checkpoints/latest.pt')
+        }, os.path.join(path_ckpt, 'latest.pt'))
 
     # save the models
     dttm = time.strftime('%Y%m%d-%H%M%S')
@@ -201,7 +222,7 @@ def main():
         'embedding_model': embedding_model.state_dict(),
         'online_net': online_net.state_dict(),
         'target_net': target_net.state_dict(),
-    }, f'checkpoints/checkpoint__{dttm}.pt')
+    }, os.path.join(path_ckpt, f'checkpoint__{dttm}.pt'))
 
 
 if __name__ == "__main__":
